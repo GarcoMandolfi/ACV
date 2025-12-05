@@ -1,13 +1,27 @@
+import argparse
+import copy
+import glob
+import importlib.util
+import os
+from pathlib import Path
+
+try:
+    from _torch_ittnotify import ensure_ittnotify
+except ImportError:  # _torch_ittnotify ships with diffvg; ignore if unavailable
+    ensure_ittnotify = None
+
+if ensure_ittnotify is not None:
+    torch_spec = importlib.util.find_spec("torch")
+    ensure_ittnotify(getattr(torch_spec, "origin", None))
+
 import torch
 import torch.nn.functional as F
-from PIL import Image
-import argparse
-from utils.img_process import *
-import os
-from tqdm import tqdm
-from sds_image_simplicity import sds_based_simplification
 import pydiffvg
 import yaml
+from PIL import Image
+from tqdm import tqdm
+from sds_image_simplicity import sds_based_simplification
+from utils.img_process import *
 
 def init_diffvg(device: torch.device,
                 use_gpu: bool = torch.cuda.is_available(),
@@ -309,34 +323,81 @@ def load_config(file_path,args):
         for key, value in config.items():
             setattr(args, key, value)
     return args
+def _run_layered_vectorization(base_args, device, target_image, file_save_name):
+    run_args = copy.deepcopy(base_args)
+    run_args.target_image = target_image
+    run_args.file_save_name = file_save_name
+    print(f"Processing {target_image} -> workdir/{file_save_name}")
+    layered_vectorization(run_args, device)
+
+
+def _resolve_save_name(base_name, image_path):
+    stem = Path(image_path).stem
+    if base_name:
+        return os.path.join(base_name, stem)
+    return stem
+
+
+def main():
+    parser = argparse.ArgumentParser(description="layered_image_vectorization")
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=str,
+        default="./config/base_config.yaml",
+        help="YAML/YML file for configuration.",
+    )
+    parser.add_argument(
+        "-timg",
+        "--target_image",
+        default="./target_imgs/sample.png",
+        type=str,
+        help="Target image to vectorize.",
+    )
+    parser.add_argument(
+        "-fsn",
+        "--file_save_name",
+        type=str,
+        default=None,
+        help="Directory suffix under workdir/ for outputs. Defaults to image stem.",
+    )
+    parser.add_argument(
+        "--batch_dir",
+        type=str,
+        default=None,
+        help="If set, run vectorization for every PNG in this directory.",
+    )
+    cli_args = parser.parse_args()
+    args = load_config(cli_args.config, cli_args)
+    args.target_image = cli_args.target_image
+    args.file_save_name = cli_args.file_save_name
+    args.batch_dir = cli_args.batch_dir
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    init_diffvg(device=device)
+
+    if args.batch_dir:
+        if not os.path.isdir(args.batch_dir):
+            print(f"Batch directory '{args.batch_dir}' not found. Nothing to do.")
+            return
+    else:
+        if not os.path.isfile(args.target_image):
+            print(f"Target image '{args.target_image}' not found. Provide a valid path with -timg.")
+            return
+
+    if args.batch_dir:
+        png_files = sorted(glob.glob(os.path.join(args.batch_dir, "*.png")))
+        if not png_files:
+            print(f"No PNG files found in {args.batch_dir}. Nothing to process.")
+            return
+        for file_path in png_files:
+            save_name = _resolve_save_name(args.file_save_name, file_path)
+            _run_layered_vectorization(args, device, file_path, save_name)
+        return
+
+    file_save_name = args.file_save_name or Path(args.target_image).stem
+    _run_layered_vectorization(args, device, args.target_image, file_save_name)
 
 
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser(description="layered_image_vectorization",)
-    # parser.add_argument("-c", "--config", type=str, default="./config/base_config.yaml",help="YAML/YML file for configuration.")
-    # parser.add_argument("-timg", "--target_image", default="./target_imgs/Snipaste_2024-11-19_16-31-12.png", type=str)
-    # parser.add_argument("-fsn", "--file_save_name", type=str, default="man",help="Files save name.")
-
-    # args = parser.parse_args()
-    # args = load_config(args.config,args)
-    # device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-    # init_diffvg(device=device)
-    # layered_vectorization(args,device)
-
-    import glob
-    # 定义文件夹路径
-    folder_path = '/home/ubuntu/workspace/WZY/Projects/image_vectorization-1.3/target_imgs/002'
-    # 获取所有 PNG 文件的路径
-    png_files = glob.glob(f'{folder_path}/*.png')
-
-    for i,file_path in enumerate(png_files):
-        parser = argparse.ArgumentParser(description="layered_image_vectorization",)
-        parser.add_argument("-c", "--config", type=str, default="./config/base_config.yaml",help="YAML/YML file for configuration.")
-        parser.add_argument("-timg", "--target_image", default=file_path, type=str)
-        parser.add_argument("-fsn", "--file_save_name", type=str, default=f"004/{file_path.split('/')[-1]}",help="Files save name.")
-
-        args = parser.parse_args()
-        args = load_config(args.config,args)
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        init_diffvg(device=device)
-        layered_vectorization(args,device)
+    main()
